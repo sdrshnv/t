@@ -6,8 +6,67 @@ Priority `1` is highest and priority `3` is lowest. A task is ready when each ta
 
 ## Install
 
+Install the latest release on macOS or Linux (Intel/AMD64 or ARM64):
+
 ```sh
-cargo install --path .
+curl -fsSL https://github.com/sdrshnv/t/releases/latest/download/install.sh | sh
+```
+
+The installer verifies the archive's SHA-256 checksum and installs `t` to
+`~/.local/bin` without sudo. It requires `curl`, `tar`, and either `sha256sum` or
+`shasum`. If needed, add the directory to your PATH (bash/zsh):
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Add that line to `~/.bashrc` or `~/.zshrc` to keep it across sessions. Rerun the
+installer to upgrade. To select a version or install directory:
+
+```sh
+curl -fsSL https://github.com/sdrshnv/t/releases/download/v0.1.0/install.sh \
+  -o /tmp/t-install.sh
+sh /tmp/t-install.sh --version v0.1.0 --install-dir "$HOME/.local/bin"
+```
+
+### Manual download
+
+Download the archive for your platform and `SHA256SUMS` from
+[GitHub Releases](https://github.com/sdrshnv/t/releases/latest):
+
+| Platform | Archive target |
+| --- | --- |
+| Linux Intel/AMD64 | `x86_64-unknown-linux-musl` |
+| Linux ARM64 | `aarch64-unknown-linux-musl` |
+| macOS Intel | `x86_64-apple-darwin` |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+
+Linux binaries bundle musl and SQLite. macOS binaries require macOS 11 or later
+and are not Apple signed or notarized.
+
+For example, after downloading the Linux Intel/AMD64 archive and checksums into
+the current directory:
+
+```sh
+grep '  t-v0.1.0-x86_64-unknown-linux-musl.tar.gz$' SHA256SUMS | sha256sum -c -
+tar -xzf t-v0.1.0-x86_64-unknown-linux-musl.tar.gz t
+mkdir -p "$HOME/.local/bin"
+install -m 755 t "$HOME/.local/bin/t"
+t --version
+```
+
+On macOS, use the matching archive and `shasum -a 256 -c -` in place of
+`sha256sum -c -`. Proceed with extraction only if verification succeeds.
+
+Remove the installed executable to uninstall (`rm "$HOME/.local/bin/t"` for the
+default directory). Upgrades and uninstalling the executable preserve task data.
+
+### Build from source
+
+With Rust installed, run this from a checkout:
+
+```sh
+cargo install --locked --path .
 ```
 
 The database is stored at `$XDG_DATA_HOME/t/tasks.db`, falling back to `$HOME/.local/share/t/tasks.db`.
@@ -77,3 +136,24 @@ cargo test --all-features
 ```
 
 See [the smoke benchmark](docs/benchmark.md) for the release-mode invocation check.
+
+## Release
+
+GitHub Actions validates changes and builds all four release archives on pull
+requests and pushes to `main`. A manual workflow run also validates without
+publishing. The workflow pins Rust 1.95.0 and builds with `Cargo.lock`.
+
+To release, update the package version in `Cargo.toml` and `Cargo.lock`, merge the
+changes to `main`, and wait for CI to pass. Then tag that commit and push the tag:
+
+```sh
+git tag -a v0.1.0 -m 'Release v0.1.0'
+git push origin v0.1.0
+```
+
+Only stable version tags matching the package version publish releases. After
+checks, tests, and packaged-binary smoke tests pass, the workflow uploads all four
+archives, the pinned installer, and `SHA256SUMS` to a draft release, then publishes
+it. Failed draft uploads can be retried by rerunning the workflow; published
+releases are never overwritten. See the
+[release workflow](https://github.com/sdrshnv/t/actions/workflows/release.yml).
