@@ -91,7 +91,9 @@ main() {
     [ "$actual" = "$expected" ] || fail 'checksum mismatch; existing installation was not changed'
 
     tar -xzf "$work_dir/$archive" -C "$work_dir" t || fail 'could not extract binary'
-    [ -f "$work_dir/t" ] && [ ! -L "$work_dir/t" ] || fail 'archive does not contain a regular binary'
+    if [ ! -f "$work_dir/t" ] || [ -L "$work_dir/t" ]; then
+        fail 'archive does not contain a regular binary'
+    fi
     mkdir -p "$install_dir" || fail "could not create $install_dir"
     [ ! -d "$install_dir/t" ] || fail "$install_dir/t is a directory"
     staged_binary=$(mktemp "$install_dir/.t.XXXXXXXX")
