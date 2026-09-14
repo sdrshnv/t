@@ -80,7 +80,7 @@ class InstallerTests(unittest.TestCase):
         self.bin = self.root / "tools"
         self.bin.mkdir()
         # Use a controlled PATH so missing-tool and checksum fallback tests are real.
-        for name in ["sh", "grep", "awk", "tar", "mktemp", "install", "mv", "mkdir", "rm", "cp", "chmod", "sha256sum", "shasum"]:
+        for name in ["sh", "grep", "awk", "tar", "gzip", "mktemp", "install", "mv", "mkdir", "rm", "cp", "chmod", "sha256sum", "shasum"]:
             tool = shutil.which(name)
             if tool:
                 (self.bin / name).symlink_to(tool)

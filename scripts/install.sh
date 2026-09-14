@@ -41,7 +41,7 @@ main() {
         *) install_dir=$PWD/$install_dir ;;
     esac
 
-    for tool in curl tar mktemp install mv; do
+    for tool in curl tar gzip mktemp install mv; do
         command -v "$tool" >/dev/null 2>&1 || fail "required tool not found: $tool"
     done
     if command -v sha256sum >/dev/null 2>&1; then

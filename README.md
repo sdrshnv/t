@@ -13,7 +13,7 @@ curl -fsSL https://github.com/sdrshnv/t/releases/latest/download/install.sh | sh
 ```
 
 The installer verifies the archive's SHA-256 checksum and installs `t` to
-`~/.local/bin` without sudo. It requires `curl`, `tar`, and either `sha256sum` or
+`~/.local/bin` without sudo. It requires `curl`, `tar`, `gzip`, and either `sha256sum` or
 `shasum`. If needed, add the directory to your PATH (bash/zsh):
 
 ```sh
