@@ -147,6 +147,37 @@ impl Database {
         load_dependencies(&self.connection)
     }
 
+    pub fn next_task(&self, priority: Option<u8>) -> Result<Option<Task>> {
+        let graph = self.graph()?;
+        let current = graph.next_with_selection(load_selection(&self.connection)?);
+        let task = match priority {
+            Some(priority) => current
+                .filter(|task| graph.effective_priority(task.id) == Some(priority))
+                .or_else(|| graph.next_at_priority(priority)),
+            None => current,
+        };
+        Ok(task.cloned())
+    }
+
+    pub fn shuffle(&mut self, now: i64) -> Result<Option<Task>> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let graph = graph_from_connection(&tx)?;
+        let selected = load_selection(&tx)?;
+        let next = graph.shuffle_next(selected);
+        if next.map(|task| task.id) != graph.next_with_selection(selected).map(|task| task.id) {
+            snapshot(&tx, "shuffle", now)?;
+            tx.execute(
+                "INSERT INTO metadata(key, value) VALUES ('selected_task_id', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [next.expect("a changed selection must exist").id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(next.cloned())
+    }
+
     pub fn add(&mut self, priority: u8, description: &str, now: i64) -> Result<Task> {
         validate_priority(priority)?;
         let tx = self
@@ -168,7 +199,7 @@ impl Database {
             "UPDATE metadata SET value = ?1 WHERE key = 'next_task_id'",
             [id + 1],
         )?;
-        recalculate_readiness(&tx, now)?;
+        refresh_scheduling_state(&tx, now)?;
         let task = load_task(&tx, id)?.expect("inserted task must exist");
         tx.commit()?;
         Ok(task)
@@ -188,7 +219,7 @@ impl Database {
             "UPDATE tasks SET priority = ?1, updated_at = ?2 WHERE id = ?3",
             params![priority, now, id],
         )?;
-        recalculate_readiness(&tx, now)?;
+        refresh_scheduling_state(&tx, now)?;
         tx.commit()?;
         Ok(true)
     }
@@ -236,7 +267,7 @@ impl Database {
             "INSERT INTO dependencies(parent_id, child_id) VALUES (?1, ?2)",
             params![parent, child],
         )?;
-        recalculate_readiness(&tx, now)?;
+        refresh_scheduling_state(&tx, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -265,7 +296,7 @@ impl Database {
             "DELETE FROM dependencies WHERE parent_id = ?1 AND child_id = ?2",
             params![parent, child],
         )?;
-        recalculate_readiness(&tx, now)?;
+        refresh_scheduling_state(&tx, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -302,7 +333,7 @@ impl Database {
             "UPDATE tasks SET completed_at = ?1, updated_at = ?1 WHERE id = ?2",
             params![now, id],
         )?;
-        recalculate_readiness(&tx, now)?;
+        refresh_scheduling_state(&tx, now)?;
         let task = load_task(&tx, id)?.expect("completed task must exist");
         tx.commit()?;
         Ok(task)
@@ -332,7 +363,7 @@ impl Database {
             "UPDATE tasks SET description = ?1, updated_at = ?2 WHERE id = ?3",
             params![description, now, id],
         )?;
-        recalculate_readiness(&tx, now)?;
+        refresh_scheduling_state(&tx, now)?;
         tx.commit()?;
         Ok(true)
     }
@@ -363,7 +394,7 @@ impl Database {
             "UPDATE tasks SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2",
             params![now, id],
         )?;
-        recalculate_readiness(&tx, now)?;
+        refresh_scheduling_state(&tx, now)?;
         tx.commit()?;
         Ok(task)
     }
@@ -503,6 +534,16 @@ fn graph_from_connection(connection: &Connection) -> Result<Graph> {
     ))
 }
 
+fn load_selection(connection: &Connection) -> Result<Option<i64>> {
+    Ok(connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'selected_task_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 fn snapshot(tx: &Transaction<'_>, kind: &str, now: i64) -> Result<i64> {
     tx.execute(
         "INSERT INTO operations(happened_at, kind) VALUES (?1, ?2)",
@@ -532,7 +573,7 @@ fn snapshot(tx: &Transaction<'_>, kind: &str, now: i64) -> Result<i64> {
     Ok(operation_id)
 }
 
-fn recalculate_readiness(tx: &Transaction<'_>, now: i64) -> Result<()> {
+fn refresh_scheduling_state(tx: &Transaction<'_>, now: i64) -> Result<()> {
     let pending: Vec<(i64, Option<i64>, bool)> = {
         let mut statement = tx.prepare(
             "SELECT task.id,
@@ -572,6 +613,16 @@ fn recalculate_readiness(tx: &Transaction<'_>, now: i64) -> Result<()> {
             _ => {}
         }
     }
+    if let Some(selected) = load_selection(tx)? {
+        let graph = graph_from_connection(tx)?;
+        if graph
+            .next_with_selection(Some(selected))
+            .map(|task| task.id)
+            != Some(selected)
+        {
+            tx.execute("DELETE FROM metadata WHERE key = 'selected_task_id'", [])?;
+        }
+    }
     Ok(())
 }
 
@@ -583,6 +634,146 @@ mod tests {
 
     fn db() -> Database {
         Database::in_memory().unwrap()
+    }
+
+    #[test]
+    fn shuffle_preserves_tasks_and_undo_restores_selection() {
+        let mut db = db();
+        db.add(2, "one", 1).unwrap();
+        db.add(2, "two", 2).unwrap();
+        db.add(3, "three", 3).unwrap();
+        let tasks = db.tasks().unwrap();
+        assert_eq!(db.shuffle(4).unwrap().unwrap().id, 2);
+        assert_eq!(db.next_task(None).unwrap().unwrap().id, 2);
+        assert_eq!(db.next_task(Some(2)).unwrap().unwrap().id, 2);
+        assert_eq!(db.next_task(Some(3)).unwrap().unwrap().id, 3);
+        assert_eq!(db.next_task(Some(1)).unwrap(), None);
+        assert_eq!(db.tasks().unwrap(), tasks);
+        assert_eq!(db.graph().unwrap().next().unwrap().id, 1);
+        assert_eq!(db.shuffle(5).unwrap().unwrap().id, 1);
+        assert_eq!(db.undo().unwrap(), "shuffle");
+        assert_eq!(db.next_task(None).unwrap().unwrap().id, 2);
+        db.complete(2, 6).unwrap();
+        assert_eq!(load_selection(&db.connection).unwrap(), None);
+        assert_eq!(db.next_task(None).unwrap().unwrap().id, 1);
+        assert_eq!(db.undo().unwrap(), "done");
+        assert_eq!(db.next_task(None).unwrap().unwrap().id, 2);
+        assert_eq!(db.undo().unwrap(), "shuffle");
+        assert_eq!(load_selection(&db.connection).unwrap(), None);
+        assert_eq!(db.tasks().unwrap(), tasks);
+    }
+
+    #[test]
+    fn empty_and_single_task_shuffles_do_not_create_history() {
+        let mut db = db();
+        assert_eq!(db.shuffle(1).unwrap(), None);
+        assert_eq!(db.history_len().unwrap(), 0);
+        db.add(1, "only", 2).unwrap();
+        db.add(2, "lower", 3).unwrap();
+        assert_eq!(db.shuffle(4).unwrap().unwrap().id, 1);
+        assert_eq!(db.history_len().unwrap(), 2);
+        assert_eq!(load_selection(&db.connection).unwrap(), None);
+    }
+
+    #[test]
+    fn eligible_selection_survives_task_changes_and_failed_mutations() {
+        let mut db = db();
+        db.add(2, "one", 1).unwrap();
+        db.add(2, "two", 2).unwrap();
+        db.shuffle(3).unwrap();
+        db.add(2, "three", 4).unwrap();
+        db.edit_description(2, "two", "edited", 5).unwrap();
+        db.add_dependency(1, 3, 6).unwrap();
+        db.remove_dependency(1, 3, 7).unwrap();
+        db.set_priority(3, 3, 8).unwrap();
+        db.complete(3, 9).unwrap();
+        db.remove(3, false, 10).unwrap();
+        assert!(db.add_dependency(2, 2, 11).is_err());
+        assert!(!db.set_priority(2, 2, 12).unwrap());
+        assert_eq!(db.next_task(None).unwrap().unwrap().id, 2);
+        assert_eq!(load_selection(&db.connection).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn ineligible_selections_are_cleared_atomically_and_restored_by_undo() {
+        for mutation in ["done", "rm", "dep", "priority", "add"] {
+            let mut db = db();
+            db.add(2, "one", 1).unwrap();
+            db.add(2, "two", 2).unwrap();
+            db.shuffle(3).unwrap();
+            match mutation {
+                "done" => {
+                    db.complete(2, 4).unwrap();
+                }
+                "rm" => {
+                    db.remove(2, false, 4).unwrap();
+                }
+                "dep" => {
+                    db.add_dependency(2, 1, 4).unwrap();
+                }
+                "priority" => {
+                    db.set_priority(2, 3, 4).unwrap();
+                }
+                "add" => {
+                    db.add(1, "urgent", 4).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(load_selection(&db.connection).unwrap(), None, "{mutation}");
+            assert_ne!(db.next_task(None).unwrap().unwrap().id, 2, "{mutation}");
+            assert_eq!(db.undo().unwrap(), mutation);
+            assert_eq!(db.next_task(None).unwrap().unwrap().id, 2, "{mutation}");
+        }
+    }
+
+    #[test]
+    fn losing_inherited_urgency_clears_selection() {
+        for remove_parent in [false, true] {
+            let mut db = db();
+            db.add(1, "one", 1).unwrap();
+            db.add(3, "prerequisite", 2).unwrap();
+            db.add(1, "parent", 3).unwrap();
+            db.add_dependency(3, 2, 4).unwrap();
+            assert_eq!(db.shuffle(5).unwrap().unwrap().id, 2);
+            if remove_parent {
+                db.remove(3, true, 6).unwrap();
+            } else {
+                db.remove_dependency(3, 2, 6).unwrap();
+            }
+            assert_eq!(load_selection(&db.connection).unwrap(), None);
+            assert_eq!(db.next_task(None).unwrap().unwrap().id, 1);
+            db.undo().unwrap();
+            assert_eq!(db.next_task(None).unwrap().unwrap().id, 2);
+        }
+    }
+
+    #[test]
+    fn preempted_selection_does_not_return_after_urgent_task_is_completed() {
+        let mut db = db();
+        db.add(2, "one", 1).unwrap();
+        db.add(2, "two", 2).unwrap();
+        db.shuffle(3).unwrap();
+        db.add(1, "urgent", 4).unwrap();
+        db.complete(3, 5).unwrap();
+        assert_eq!(db.next_task(None).unwrap().unwrap().id, 1);
+    }
+
+    #[test]
+    fn reads_ignore_stale_selection_without_mutation() {
+        let mut db = db();
+        db.add(1, "one", 1).unwrap();
+        db.add(2, "lower", 2).unwrap();
+        for selected in [2, 99] {
+            db.connection
+                .execute(
+                    "INSERT OR REPLACE INTO metadata(key, value) VALUES ('selected_task_id', ?1)",
+                    [selected],
+                )
+                .unwrap();
+            assert_eq!(db.next_task(None).unwrap().unwrap().id, 1);
+            assert_eq!(load_selection(&db.connection).unwrap(), Some(selected));
+            assert_eq!(db.history_len().unwrap(), 2);
+        }
     }
 
     #[test]

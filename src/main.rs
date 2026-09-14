@@ -34,6 +34,12 @@ fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         None => print_next(&database, None),
+        Some(Command::Shuffle) => {
+            if let Some(task) = database.shuffle(now())? {
+                print!("{}", render::next(&database.graph()?, &task));
+            }
+            Ok(())
+        }
         Some(Command::One) => print_next(&database, Some(1)),
         Some(Command::Two) => print_next(&database, Some(2)),
         Some(Command::Three) => print_next(&database, Some(3)),
@@ -112,12 +118,8 @@ fn run(cli: Cli) -> Result<()> {
 
 fn print_next(database: &Database, priority: Option<u8>) -> Result<()> {
     let graph = database.graph()?;
-    let task = match priority {
-        Some(priority) => graph.next_at_priority(priority),
-        None => graph.next(),
-    };
-    if let Some(task) = task {
-        print!("{}", render::next(&graph, task));
+    if let Some(task) = database.next_task(priority)? {
+        print!("{}", render::next(&graph, &task));
     }
     Ok(())
 }
@@ -127,8 +129,7 @@ fn resolve_id(database: &Database, id: Option<i64>) -> Result<i64> {
         return Ok(id);
     }
     database
-        .graph()?
-        .next()
+        .next_task(None)?
         .map(|task| task.id)
         .ok_or_else(|| Error::domain("no actionable task"))
 }

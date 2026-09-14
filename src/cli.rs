@@ -14,6 +14,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Cycle to the next task in the current effective priority tier.
+    Shuffle,
     /// Add a task.
     Add {
         #[arg(value_parser = clap::value_parser!(u8).range(1..=3))]

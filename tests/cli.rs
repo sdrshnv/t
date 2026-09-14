@@ -43,6 +43,114 @@ impl App {
 }
 
 #[test]
+fn shuffle_persists_cycles_and_drives_default_edit_and_done() {
+    let app = App::new();
+    app.run(&["add", "2", "A"]);
+    app.run(&["add", "2", "B"]);
+    app.run(&["add", "2", "C"]);
+    app.run(&["add", "3", "later"]);
+    app.command().assert().success().stdout("#1 [2] A\n");
+    for expected in ["#2 [2] B\n", "#3 [2] C\n", "#1 [2] A\n", "#2 [2] B\n"] {
+        app.command()
+            .arg("shuffle")
+            .assert()
+            .success()
+            .stdout(expected)
+            .stderr("");
+        app.command().assert().success().stdout(expected);
+        app.command().arg("2").assert().success().stdout(expected);
+    }
+    app.command()
+        .arg("3")
+        .assert()
+        .success()
+        .stdout("#4 [3] later\n");
+    app.command()
+        .arg("ls")
+        .assert()
+        .success()
+        .stdout("#1 [2] A\n#2 [2] B\n#3 [2] C\n#4 [3] later\n");
+    app.command().assert().success().stdout("#2 [2] B\n");
+
+    let editor = app.editor("edit-selected", "printf '%s\\n' 'B edited' > \"$1\"");
+    app.command()
+        .arg("edit")
+        .env("EDITOR", editor)
+        .assert()
+        .success()
+        .stdout("edited #2\n");
+    app.command().assert().success().stdout("#2 [2] B edited\n");
+    app.command()
+        .arg("done")
+        .assert()
+        .success()
+        .stdout("done #2\n");
+    app.command().assert().success().stdout("#1 [2] A\n");
+    app.command()
+        .arg("undo")
+        .assert()
+        .success()
+        .stdout("undid done\n");
+    app.command().assert().success().stdout("#2 [2] B edited\n");
+    app.command()
+        .arg("undo")
+        .assert()
+        .success()
+        .stdout("undid edit\n");
+    app.command()
+        .arg("undo")
+        .assert()
+        .success()
+        .stdout("undid shuffle\n");
+    app.command().assert().success().stdout("#1 [2] A\n");
+}
+
+#[test]
+fn shuffle_renders_inherited_priority_context_and_handles_no_alternatives() {
+    let app = App::new();
+    app.command()
+        .arg("shuffle")
+        .assert()
+        .success()
+        .stdout("")
+        .stderr("");
+    app.command()
+        .arg("undo")
+        .assert()
+        .code(1)
+        .stderr("t: nothing to undo\n");
+    app.run(&["add", "1", "A"]);
+    app.run(&["add", "3", "prerequisite"]);
+    app.command()
+        .arg("shuffle")
+        .assert()
+        .success()
+        .stdout("#1 [1] A\n");
+    app.command()
+        .arg("undo")
+        .assert()
+        .success()
+        .stdout("undid add\n");
+    app.run(&["add", "3", "prerequisite"]);
+    app.run(&["add", "1", "parent"]);
+    app.run(&["dep", "3", "2"]);
+    app.command()
+        .arg("shuffle")
+        .assert()
+        .success()
+        .stdout("#3 [1] parent\n  #2 [1←3] prerequisite\n");
+    app.command()
+        .assert()
+        .success()
+        .stdout("#3 [1] parent\n  #2 [1←3] prerequisite\n");
+    app.command()
+        .arg("shuffle")
+        .assert()
+        .success()
+        .stdout("#1 [1] A\n");
+}
+
+#[test]
 fn canonical_tax_workflow_persists_and_schedules_dependencies() {
     let app = App::new();
     app.command()
@@ -266,6 +374,7 @@ fn completion_scripts_are_generated_without_creating_storage() {
             .assert()
             .success()
             .stdout(predicate::str::contains(marker))
+            .stdout(predicate::str::contains("shuffle"))
             .stderr("");
     }
     assert!(!Path::new(app.data.path()).join("t/tasks.db").exists());

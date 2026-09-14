@@ -16,6 +16,7 @@ The database is stored at `$XDG_DATA_HOME/t/tasks.db`, falling back to `$HOME/.l
 
 ```text
 t                                      show the next task and one context path
+t shuffle                              cycle within the current effective priority tier
 t 1 | t 2 | t 3                        show the next task at that effective priority
 t add <1|2|3> <description...>          add a task
 t done [id]                            complete a task (the next task by default)
@@ -50,6 +51,20 @@ t
 ```
 
 All mutations and their undo records commit atomically. Deletion is soft; a connected task requires `rm --force`, which removes its incident dependency edges in the same transaction. `undo` is persistent and multi-level, but there is no redo stack.
+
+`t shuffle` advances through ready tasks in the current task's effective priority tier
+and wraps around. The cycle uses the scheduler's existing order: intrinsic priority,
+then readiness time, then task ID. Inherited urgency counts, so a `[1←3]` prerequisite
+cycles with priority-1 tasks. Each shuffle shows the chosen task and its context path.
+
+The choice persists: `t` shows it again, and `t done` or `t edit` without an ID acts
+on it. Numeric views (`t 1`, `t 2`, `t 3`) honor the choice in its tier and otherwise
+show the first task in the requested tier; viewing a tier does not change the choice.
+Task changes keep the choice while it remains ready in the highest effective tier.
+Completing, deleting, or blocking it, or introducing a higher effective priority,
+clears the choice and resumes normal scheduling. `t ls` keeps its usual order.
+`t undo` reverses a shuffle. With no ready tasks, shuffle prints nothing; with only
+one task in the tier, it shows that task. Neither case adds an undo record.
 
 Output is unstyled plain text. Empty views are successful and print nothing; domain/runtime errors exit 1, while command-line parsing errors exit 2.
 

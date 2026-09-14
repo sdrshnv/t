@@ -159,6 +159,29 @@ impl Graph {
             .find(|task| self.effective_priority(task.id) == Some(priority))
     }
 
+    /// Honor a saved selection only while it is actionable in the highest tier.
+    pub fn next_with_selection(&self, selected: Option<i64>) -> Option<&Task> {
+        let first = self.next()?;
+        selected
+            .and_then(|id| self.task(id))
+            .filter(|task| {
+                self.is_actionable(task.id)
+                    && self.effective_priority(task.id) == self.effective_priority(first.id)
+            })
+            .or(Some(first))
+    }
+
+    pub fn shuffle_next(&self, selected: Option<i64>) -> Option<&Task> {
+        let current = self.next_with_selection(selected)?;
+        let tier: Vec<_> = self
+            .actionable()
+            .into_iter()
+            .filter(|task| self.effective_priority(task.id) == self.effective_priority(current.id))
+            .collect();
+        let index = tier.iter().position(|task| task.id == current.id)?;
+        Some(tier[(index + 1) % tier.len()])
+    }
+
     pub fn context_chain(&self, leaf: i64) -> Vec<&Task> {
         let mut chain = Vec::new();
         let mut current = leaf;
@@ -273,6 +296,47 @@ mod tests {
         );
         let ids: Vec<_> = graph.actionable().iter().map(|task| task.id).collect();
         assert_eq!(ids, vec![2, 4, 3]);
+    }
+
+    #[test]
+    fn shuffle_cycles_in_scheduler_order_within_the_effective_tier() {
+        let mut completed = task(7, 1, Some(1));
+        completed.completed_at = Some(30);
+        let mut deleted = task(8, 1, Some(1));
+        deleted.deleted_at = Some(30);
+        let graph = Graph::new(
+            vec![
+                task(1, 1, None),
+                task(2, 1, Some(20)),
+                task(3, 3, Some(1)),
+                task(4, 2, Some(30)),
+                task(6, 1, Some(10)),
+                task(5, 1, Some(10)),
+                completed,
+                deleted,
+                task(9, 2, Some(1)),
+            ],
+            vec![
+                Dependency {
+                    parent: 1,
+                    child: 3,
+                },
+                Dependency {
+                    parent: 1,
+                    child: 4,
+                },
+            ],
+        );
+        assert_eq!(graph.next().unwrap().id, 5);
+        let mut selected = None;
+        for expected in [6, 2, 4, 3, 5, 6] {
+            selected = graph.shuffle_next(selected).map(|task| task.id);
+            assert_eq!(selected, Some(expected));
+        }
+        for invalid in [1, 7, 8, 9, 99] {
+            assert_eq!(graph.next_with_selection(Some(invalid)).unwrap().id, 5);
+            assert_eq!(graph.shuffle_next(Some(invalid)).unwrap().id, 6);
+        }
     }
 
     #[test]
